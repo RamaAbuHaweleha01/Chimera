@@ -1,0 +1,16 @@
+# Chimera Payload Requirements
+# Install using: pip install -r requirements.txt
+
+# Core
+psutil>=5.9.0
+pynput>=1.7.6
+Pillow>=9.5.0
+pycryptodome>=3.19.0
+requests>=2.31.0
+
+# Windows-only (for compilation)
+pywin32>=306
+
+# Build tool
+pyinstaller>=6.0.0
+
