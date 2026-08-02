@@ -119,11 +119,5 @@ def create_dummy_package():
 # ============================================
 
 if __name__ == '__main__':
-    print("""
-    ╔════════════════════════════════════════════╗
-    ║    🎬 CineVerse Media Service              ║
-    ║    URL: http://localhost:5000              ║
-    ║    Status: Running...                      ║
-    ╚════════════════════════════════════════════╝
-    """)
+
     app.run(host='0.0.0.0', port=5000, debug=False)

