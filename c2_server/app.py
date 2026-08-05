@@ -1,3 +1,6 @@
+# ~/Desktop/Chimera/c2_server/app.pyDesktop/Chimera/c2_server/app.py
+
+
 """
 Chimera C2 Server – Ransomware Ready
 ====================================

